@@ -58,3 +58,19 @@ enum {
     PROFILE_BIAS_POWER,
     PROFILE_BIAS_PERFORMANCE
 };
+
+enum OP_PROJECT {
+    PROJECT_OP = 0,
+    PROJECT_OPT
+};
+
+struct PROJECT_TUNING {
+    char *gpu_max_def;
+    char *gpu_max_lim;
+
+    char *gpu_min_def;
+    char *gpu_min_lim;
+
+    int profile_sustained_perf[4];
+    int profile_vr[4];
+};

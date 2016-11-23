@@ -26,7 +26,7 @@
  * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-#define LOG_NIDEBUG 0
+#define LOG_NDEBUG 0
 
 #include <errno.h>
 #include <string.h>
@@ -47,13 +47,59 @@
 #include "performance.h"
 #include "power-common.h"
 
+#define GPU_MAX_FREQ_PATH "/sys/class/kgsl/kgsl-3d0/devfreq/max_freq"
+#define GPU_MIN_FREQ_PATH "/sys/class/kgsl/kgsl-3d0/devfreq/min_freq"
+
+#define PROFILE_SUSTAINED_PERF 1337
+#define PROFILE_VR             1338
+
 static int current_power_profile = PROFILE_BALANCED;
+static int saved_profile = PROFILE_BALANCED;
+
+static int sustained_perf_mode = 0;
+static int vr_mode = 0;
+
+static struct PROJECT_TUNING project_tuning;
 
 extern void interaction(int duration, int num_args, int opt_list[]);
 
 int get_number_of_profiles() {
     return 5;
 }
+
+static struct PROJECT_TUNING PROJECT_TUNING_OP = {
+    .gpu_max_def = "624000000",
+    .gpu_max_lim = "560000000",
+
+    .gpu_min_def = "133000000",
+    .gpu_min_lim = "401800000",
+
+    .profile_sustained_perf = {
+        CPUS_ONLINE_MAX_LIMIT_BIG, 0x0,
+        MAX_FREQ_LITTLE_CORE_0, 0x122A0, // 1190MHz
+    },
+    .profile_vr = {
+        CPUS_ONLINE_MAX_LIMIT_BIG, 0x0,
+        MAX_FREQ_LITTLE_CORE_0, 0x122A0, // 1190MHz
+    },
+};
+
+static struct PROJECT_TUNING PROJECT_TUNING_OPT = {
+    .gpu_max_def = "652800000",
+    .gpu_max_lim = "560000000",
+
+    .gpu_min_def = "133000000",
+    .gpu_min_lim = "401800000",
+
+    .profile_sustained_perf = {
+        CPUS_ONLINE_MAX_LIMIT_BIG, 0x0,
+        MAX_FREQ_LITTLE_CORE_0, 0x122A0, // 1190MHz
+    },
+    .profile_vr = {
+        CPUS_ONLINE_MAX_LIMIT_BIG, 0x0,
+        MAX_FREQ_LITTLE_CORE_0, 0x122A0, // 1190MHz
+    },
+};
 
 static int profile_high_performance[] = {
     SCHED_BOOST_ON_V3, 0x1,
@@ -79,6 +125,65 @@ static int profile_bias_performance[] = {
     CPUS_ONLINE_MAX_LIMIT_BIG, 0x2,
     CPUS_ONLINE_MAX_LIMIT_LITTLE, 0x2,
     MIN_FREQ_BIG_CORE_0, 0x578,
+};
+
+/* 1. cpufreq params
+ *    -above_hispeed_delay for LVT - 40ms
+ *    -go hispeed load for LVT - 95
+ *    -hispeed freq for LVT - 556 MHz
+ *    -target load for LVT - 90
+ *    -above hispeed delay for sLVT - 40ms
+ *    -go hispeed load for sLVT - 95
+ *    -hispeed freq for sLVT - 806 MHz
+ *    -target load for sLVT - 90
+ * 2. bus DCVS set to V2 config:
+ *    -low power ceil mpbs - 2500
+ *    -low power io percent - 50
+ * 3. hysteresis optimization
+ *    -bus dcvs hysteresis tuning
+ *    -sample_ms of 10 ms
+ */
+static int video_encode_resource_values[] = {
+    ABOVE_HISPEED_DELAY_BIG, 0x4,
+    GO_HISPEED_LOAD_BIG, 0x5F,
+    HISPEED_FREQ_BIG, 0x326,
+    TARGET_LOADS_BIG, 0x5A,
+    ABOVE_HISPEED_DELAY_LITTLE, 0x4,
+    GO_HISPEED_LOAD_LITTLE, 0x5F,
+    HISPEED_FREQ_LITTLE, 0x22C,
+    TARGET_LOADS_LITTLE, 0x5A,
+    LOW_POWER_CEIL_MBPS, 0x9C4,
+    LOW_POWER_IO_PERCENT, 0x32,
+    CPUBW_HWMON_V1, 0x0,
+    CPUBW_HWMON_SAMPLE_MS, 0xA,
+};
+
+static int resources_launch[] = {
+    SCHED_BOOST_ON_V3, 0x1,
+    MAX_FREQ_BIG_CORE_0, 0xFFF,
+    MAX_FREQ_LITTLE_CORE_0, 0xFFF,
+    MIN_FREQ_BIG_CORE_0, 0xFFF,
+    MIN_FREQ_LITTLE_CORE_0, 0xFFF,
+    CPUBW_HWMON_MIN_FREQ, 0x8C,
+    ALL_CPUS_PWR_CLPS_DIS_V3, 0x1,
+    STOR_CLK_SCALE_DIS, 0x1,
+};
+
+static int resources_cpu_boost[] = {
+    SCHED_BOOST_ON_V3, 0x1,
+    MIN_FREQ_BIG_CORE_0, 0x3E8,
+};
+
+static int resources_interaction_fling_boost[] = {
+    CPUBW_HWMON_MIN_FREQ, 0x33,
+    MIN_FREQ_BIG_CORE_0, 0x3E8,
+    MIN_FREQ_LITTLE_CORE_0, 0x3E8,
+    SCHED_BOOST_ON_V3, 0x1,
+//   SCHED_GROUP_ON, 0x1,
+};
+
+static int resources_interaction_boost[] = {
+    MIN_FREQ_BIG_CORE_0, 0x3E8,
 };
 
 static void set_power_profile(int profile) {
@@ -112,6 +217,16 @@ static void set_power_profile(int profile) {
         perform_hint_action(DEFAULT_PROFILE_HINT_ID, profile_bias_performance,
                 ARRAY_SIZE(profile_bias_performance));
         ALOGD("%s: Set bias perf mode", __func__);
+
+    } else if (profile == PROFILE_SUSTAINED_PERF) {
+        perform_hint_action(DEFAULT_PROFILE_HINT_ID, project_tuning.profile_sustained_perf,
+                ARRAY_SIZE(project_tuning.profile_sustained_perf));
+        ALOGD("%s: Set sustained performance mode", __func__);
+
+    } else if (profile == PROFILE_VR) {
+        perform_hint_action(DEFAULT_PROFILE_HINT_ID, project_tuning.profile_vr,
+                ARRAY_SIZE(project_tuning.profile_vr));
+        ALOGD("%s: Set vr mode", __func__);
 
     }
 
@@ -147,39 +262,8 @@ static int process_video_encode_hint(void *metadata)
     if (video_encode_metadata.state == 1) {
         if ((strncmp(governor, INTERACTIVE_GOVERNOR, strlen(INTERACTIVE_GOVERNOR)) == 0) &&
                 (strlen(governor) == strlen(INTERACTIVE_GOVERNOR))) {
-            /* 1. cpufreq params
-             *    -above_hispeed_delay for LVT - 40ms
-             *    -go hispeed load for LVT - 95
-             *    -hispeed freq for LVT - 556 MHz
-             *    -target load for LVT - 90
-             *    -above hispeed delay for sLVT - 40ms
-             *    -go hispeed load for sLVT - 95
-             *    -hispeed freq for sLVT - 806 MHz
-             *    -target load for sLVT - 90
-             * 2. bus DCVS set to V2 config:
-             *    -low power ceil mpbs - 2500
-             *    -low power io percent - 50
-             * 3. hysteresis optimization
-             *    -bus dcvs hysteresis tuning
-             *    -sample_ms of 10 ms
-             */
-            int resource_values[] = {
-                ABOVE_HISPEED_DELAY_BIG, 0x4,
-                GO_HISPEED_LOAD_BIG, 0x5F,
-                HISPEED_FREQ_BIG, 0x326,
-                TARGET_LOADS_BIG, 0x5A,
-                ABOVE_HISPEED_DELAY_LITTLE, 0x4,
-                GO_HISPEED_LOAD_LITTLE, 0x5F,
-                HISPEED_FREQ_LITTLE, 0x22C,
-                TARGET_LOADS_LITTLE, 0x5A,
-                LOW_POWER_CEIL_MBPS, 0x9C4,
-                LOW_POWER_IO_PERCENT, 0x32,
-                CPUBW_HWMON_V1, 0x0,
-                CPUBW_HWMON_SAMPLE_MS, 0xA,
-            };
-
             perform_hint_action(video_encode_metadata.hint_id,
-                    resource_values, ARRAY_SIZE(resource_values));
+                    video_encode_resource_values, ARRAY_SIZE(video_encode_resource_values));
             ALOGI("Video Encode hint start");
             return HINT_HANDLED;
         }
@@ -202,33 +286,61 @@ int power_hint_override(__unused struct power_module *module,
     long long elapsed_time;
     int duration;
 
-    int resources_launch_boost[] = {
-        SCHED_BOOST_ON_V3, 0x1,
-        MAX_FREQ_BIG_CORE_0, 0xFFF,
-        MAX_FREQ_LITTLE_CORE_0, 0xFFF,
-        MIN_FREQ_BIG_CORE_0, 0xFFF,
-        MIN_FREQ_LITTLE_CORE_0, 0xFFF,
-        CPUBW_HWMON_MIN_FREQ, 0x8C,
-        ALL_CPUS_PWR_CLPS_DIS_V3, 0x1,
-        STOR_CLK_SCALE_DIS, 0x1,
-    };
+    if (hint == POWER_HINT_SUSTAINED_PERFORMANCE) {
+        int enable = *((int *)data);
+        ALOGV("Sustained performance: %s", enable ? "enable" : "disable");
 
-    int resources_cpu_boost[] = {
-        SCHED_BOOST_ON_V3, 0x1,
-        MIN_FREQ_BIG_CORE_0, 0x3E8,
-    };
+        if (enable && sustained_perf_mode == 0) {
+            if (vr_mode == 0) {
+                saved_profile = current_power_profile;
+                set_power_profile(PROFILE_SUSTAINED_PERF);
+            }
 
-    int resources_interaction_fling_boost[] = {
-        CPUBW_HWMON_MIN_FREQ, 0x33,
-        MIN_FREQ_BIG_CORE_0, 0x3E8,
-        MIN_FREQ_LITTLE_CORE_0, 0x3E8,
-        SCHED_BOOST_ON_V3, 0x1,
-   //   SCHED_GROUP_ON, 0x1,
-    };
+            sysfs_write(GPU_MAX_FREQ_PATH, project_tuning.gpu_max_lim);
 
-    int resources_interaction_boost[] = {
-        MIN_FREQ_BIG_CORE_0, 0x3E8,
-    };
+            sustained_perf_mode = 1;
+        } else if (sustained_perf_mode == 1) {
+            sustained_perf_mode = 0;
+
+            if (vr_mode == 0) {
+                set_power_profile(saved_profile);
+            }
+
+            sysfs_write(GPU_MAX_FREQ_PATH, project_tuning.gpu_max_def);
+        }
+
+        return HINT_HANDLED;
+    }
+
+    if (hint == POWER_HINT_VR_MODE) {
+        int enable = *((int *)data);
+        ALOGV("VR mode: %s", enable ? "enable" : "disable");
+
+        if (enable && vr_mode == 0) {
+            if (sustained_perf_mode == 0) {
+                saved_profile = current_power_profile;
+                set_power_profile(PROFILE_VR);
+            }
+
+            sysfs_write(GPU_MIN_FREQ_PATH, project_tuning.gpu_min_lim);
+
+            vr_mode = 1;
+        } else if (vr_mode == 1) {
+            vr_mode = 0;
+
+            if (sustained_perf_mode == 0) {
+                set_power_profile(saved_profile);
+            }
+
+            sysfs_write(GPU_MIN_FREQ_PATH, project_tuning.gpu_min_def);
+        }
+
+        return HINT_HANDLED;
+    }
+
+    /* Skip other hints in sustained performance and vr mode */
+    if (sustained_perf_mode || vr_mode)
+        return HINT_HANDLED;
 
     if (hint == POWER_HINT_SET_PROFILE) {
         set_power_profile(*(int32_t *)data);
@@ -267,19 +379,10 @@ int power_hint_override(__unused struct power_module *module,
     }
 
     if (hint == POWER_HINT_LAUNCH) {
-        launch_boost_info_t *info = (launch_boost_info_t *)data;
-        if (info == NULL) {
-            ALOGE("Invalid argument for launch boost");
-            return HINT_HANDLED;
-        }
-
         duration = 2000;
 
-        ALOGV("LAUNCH_BOOST: %s (pid=%d)", info->packageName, info->pid);
-
-        start_prefetch(info->pid, info->packageName);
-        interaction(duration, ARRAY_SIZE(resources_launch_boost),
-                resources_launch_boost);
+        interaction(duration, ARRAY_SIZE(resources_launch),
+                resources_launch);
         return HINT_HANDLED;
     }
 
@@ -329,4 +432,20 @@ int set_interactive_override(__unused struct power_module *module, int on)
         }
     }
     return HINT_NONE;
+}
+
+void set_project(int project) {
+    ALOGV("%s: project=%d", __func__, project);
+
+    if (project == PROJECT_OP) {
+        ALOGV("%s: Detected OP3", __func__);
+
+        project_tuning = PROJECT_TUNING_OP;
+    } else if (project == PROJECT_OPT) {
+        ALOGV("%s: Detected OP3T", __func__);
+
+        project_tuning = PROJECT_TUNING_OPT;
+    } else {
+       ALOGE("%s: Unknown project!", __func__);
+    }
 }

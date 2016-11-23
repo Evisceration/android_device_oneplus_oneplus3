@@ -40,6 +40,8 @@
 
 #define LOG_TAG "QCOM PowerHAL"
 #include <utils/Log.h>
+
+#include <cutils/properties.h>
 #include <hardware/hardware.h>
 #include <hardware/power.h>
 #include <pthread.h>
@@ -58,6 +60,10 @@ static int saved_mpdecision_slack_min = -1;
 static int slack_node_rw_failed = 0;
 static int display_hint_sent;
 
+static const char* PROP_PROJECT_NAME = "ro.boot.project_name";
+static const char* PROJECT_NAME_T    = "15811";
+extern void set_project(int project);
+
 static struct hw_module_methods_t power_module_methods = {
     .open = NULL,
 };
@@ -66,8 +72,18 @@ static pthread_mutex_t hint_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void power_init(__attribute__((unused))struct power_module *module)
 {
+    char prj_name[PROP_VALUE_MAX];
+
     ALOGI("QCOM power HAL initing.");
-    ALOGI("... for real");
+
+    property_get(PROP_PROJECT_NAME, prj_name, NULL);
+    if (!strcmp(prj_name, PROJECT_NAME_T)) {
+        ALOGV("Setting up for OP3T");
+        set_project(PROJECT_OPT);
+    } else {
+        ALOGV("Setting up for OP3");
+        set_project(PROJECT_OP);
+    }
 }
 
 static void process_video_decode_hint(void *metadata)
@@ -202,7 +218,6 @@ static void power_hint(__attribute__((unused)) struct power_module *module, powe
         case POWER_HINT_VSYNC:
         case POWER_HINT_INTERACTION:
         case POWER_HINT_CPU_BOOST:
-        case POWER_HINT_LAUNCH:
         case POWER_HINT_SET_PROFILE:
         case POWER_HINT_LOW_POWER:
         break;
@@ -471,7 +486,7 @@ struct power_module HAL_MODULE_INFO_SYM = {
         .module_api_version = POWER_MODULE_API_VERSION_0_3,
         .hal_api_version = HARDWARE_HAL_API_VERSION,
         .id = POWER_HARDWARE_MODULE_ID,
-        .name = "QCOM Power HAL",
+        .name = "OnePlus3 Power HAL",
         .author = "Qualcomm/Alexander Martinz",
         .methods = &power_module_methods,
     },
