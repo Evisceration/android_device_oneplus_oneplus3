@@ -37,12 +37,16 @@ static const char* PROJECT_NAME_T    = "15811";
 // performance when there is context preemption, we only have to modify the low latency
 // parameter.
 #define GPU_INFLIGHT_PATH "/sys/class/kgsl/kgsl-3d0/dispatch/inflight_low_latency"
+static const int GPU_INFLIGHT_INDEX  = 0;
+static const char* GPU_INFLIGHT_PROP = "persist.vr.tunable.gpu_inflight";
 
 #define DEVFREQ_BUS_SPEED_PATH "/sys/class/devfreq/soc:qcom,gpubw/min_freq"
+static const int DEVFREQ_BUS_SPEED_INDEX  = 1;
+static const char* DEVFREQ_BUS_SPEED_PROP = "persist.vr.tunable.devfreq_bus";
 
 static struct SysfsTunable sysfsTunables[] = {
-    { .path = GPU_INFLIGHT_PATH, .value = 4, .value_vr = 2 },
-    { .path = DEVFREQ_BUS_SPEED_PATH, .value = 0, .value_vr = 7904 },
+    { .path = GPU_INFLIGHT_PATH, .value = 4, .value_vr = 2, .ignore = false },
+    { .path = DEVFREQ_BUS_SPEED_PATH, .value = 0, .value_vr = 7904, .ignore = false },
 };
 
 // Set global display/GPU/scheduler configuration to used for VR apps.
@@ -50,7 +54,9 @@ static void set_vr_performance_configuration() {
     int length = sizeof(sysfsTunables) / sizeof(sysfsTunables[0]);
 
     for (int i = 0; i < length; i++) {
-        write_int(sysfsTunables[i].value_vr, sysfsTunables[i].path);
+        if (!sysfsTunables[i].ignore) {
+            write_int(sysfsTunables[i].value_vr, sysfsTunables[i].path);
+        }
     }
 }
 
@@ -63,10 +69,27 @@ static void unset_vr_performance_configuration() {
     }
 }
 
+static void read_vr_configuration() {
+    if (!property_get_bool(GPU_INFLIGHT_PROP, true)) {
+        sysfsTunables[GPU_INFLIGHT_INDEX].ignore = true;
+        ALOGV("Ignoring gpu inflight");
+    }
+
+    if (!property_get_bool(DEVFREQ_BUS_SPEED_PROP, true)) {
+        sysfsTunables[DEVFREQ_BUS_SPEED_INDEX].ignore = true;
+        ALOGV("Ignoring devfreq bus speed");
+    }
+}
+
 static void vr_init(struct vr_module *module __unused) {
     char prj_name[PROP_VALUE_MAX];
 
     ALOGI("%s: Hey ho, let's go!", __FUNCTION__);
+
+    // apply user configuration
+    read_vr_configuration();
+
+    // set up device specific configurations
 
     property_get(PROP_PROJECT_NAME, prj_name, NULL);
     if (!strcmp(prj_name, PROJECT_NAME_T)) {

@@ -23,4 +23,6 @@ struct SysfsTunable {
     const int value;
     // value applied when in vr mode
     const int value_vr;
+
+    bool ignore;
 };
