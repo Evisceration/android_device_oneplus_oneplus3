@@ -195,7 +195,7 @@ static void set_power_profile(int profile) {
 
     if (current_power_profile != PROFILE_BALANCED) {
         undo_hint_action(DEFAULT_PROFILE_HINT_ID);
-        ALOGV("%s: Hint undone", __func__);
+        ALOGD("%s: Hint undone", __func__);
     }
 
     if (profile == PROFILE_POWER_SAVE) {
@@ -286,7 +286,7 @@ int power_hint_override(__unused struct power_module *module,
     long long elapsed_time;
     int duration;
 
-    if (hint == POWER_HINT_SUSTAINED_PERFORMANCE) {
+    if (hint == POWER_HINT_SUSTAINED_PERFORMANCE && data != NULL) {
         int enable = *((int *)data);
         ALOGV("Sustained performance: %s", enable ? "enable" : "disable");
 
@@ -312,7 +312,7 @@ int power_hint_override(__unused struct power_module *module,
         return HINT_HANDLED;
     }
 
-    if (hint == POWER_HINT_VR_MODE) {
+    if (hint == POWER_HINT_VR_MODE && data != NULL) {
         int enable = *((int *)data);
         ALOGV("VR mode: %s", enable ? "enable" : "disable");
 
